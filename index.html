@@ -127,6 +127,7 @@
     <div class="actions">
       <button id="startBtn">Начать сканирование</button>
       <button id="stopBtn" class="danger" disabled>Остановить</button>
+      <button id="retryBtn" class="secondary" disabled>Повторить ошибки</button>
       <button id="downloadBtn" class="secondary" disabled>Скачать CSV</button>
       <button id="clearBtn" class="secondary">Очистить результаты</button>
     </div>
@@ -170,6 +171,7 @@
   const downloadBtn = $("downloadBtn");
   const clearBtn = $("clearBtn");
   const testKeyBtn = $("testKeyBtn");
+  const retryBtn = $("retryBtn");
   const keyStatusEl = $("keyStatus");
   const progressBar = $("progressBar");
   const statusEl = $("status");
@@ -311,6 +313,26 @@
           throw new Error(msg);
         }
         const data = await res.json();
+        const runtimeErr = data?.lighthouseResult?.runtimeError;
+        if (runtimeErr && runtimeErr.code && runtimeErr.code !== "NO_ERROR") {
+          const code = runtimeErr.code;
+          const detail = runtimeErr.message || "";
+          let hint = "";
+          switch (code) {
+            case "ERRORED_DOCUMENT_REQUEST":
+            case "FAILED_DOCUMENT_REQUEST":
+              hint = "страница не отдаёт HTML (ошибка сервера/блокировка бота)"; break;
+            case "DNS_FAILURE":
+              hint = "DNS не резолвится"; break;
+            case "NO_FCP":
+              hint = "страница не рендерится (нет First Contentful Paint)"; break;
+            case "PROTOCOL_TIMEOUT":
+              hint = "таймаут — страница слишком медленная"; break;
+            case "INSECURE_DOCUMENT_REQUEST":
+              hint = "HTTPS-ошибка сертификата"; break;
+          }
+          throw new Error(`Lighthouse: ${code}${hint ? ` (${hint})` : ""}${detail ? ` — ${detail}` : ""}`);
+        }
         const score = data?.lighthouseResult?.categories?.performance?.score;
         if (typeof score !== "number") throw new Error("нет оценки performance");
         return Math.round(score * 100);
@@ -369,12 +391,7 @@
     statusEl.innerHTML = `<span style="color:#cf222e; font-weight:600;">⚠ Квота исчерпана.</span> ${msg} Частичные результаты можно скачать кнопкой «Скачать CSV».`;
   }
 
-  async function runScan() {
-    const urls = parseUrls(urlsEl.value);
-    if (!urls.length) {
-      alert("Добавьте хотя бы одну ссылку.");
-      return;
-    }
+  function requireApiKey() {
     const apiKey = apiKeyEl.value.trim();
     if (!apiKey) {
       alert(
@@ -386,37 +403,36 @@
         `4. Вставьте ключ (AIza…) в поле выше и нажмите «Проверить ключ».`
       );
       apiKeyEl.focus();
-      return;
+      return null;
     }
+    return apiKey;
+  }
+
+  async function runIndices(indices, apiKey, label) {
     const concurrency = Math.max(1, Math.min(5, parseInt(concurrencyEl.value, 10) || 1));
     const retries = Math.max(0, Math.min(5, parseInt(retriesEl.value, 10) || 0));
-
-    results = urls.map(url => ({ url, desktop: null, mobile: null, status: "ожидание", error: null }));
-    tbody.innerHTML = "";
-    results.forEach((_, i) => updateRow(i));
-    resultsCard.style.display = "";
-    updateSummary();
-    setProgress(0, urls.length);
 
     running = true;
     stopRequested = false;
     quotaHit = false;
     quotaAnonymous = false;
     startBtn.disabled = true;
+    retryBtn.disabled = true;
     stopBtn.disabled = false;
     downloadBtn.disabled = true;
-    statusEl.innerHTML = `Запуск… используется ключ <b>${maskKey(apiKey)}</b>, параллельно: ${concurrency}.`;
+    statusEl.innerHTML = `${label}: ключ <b>${maskKey(apiKey)}</b>, параллельно: ${concurrency}, задач: ${indices.length}.`;
 
-    let nextIndex = 0;
+    let queuePos = 0;
     let completed = 0;
+    setProgress(0, indices.length);
 
     async function worker() {
       while (!stopRequested) {
-        const i = nextIndex++;
-        if (i >= results.length) return;
-        await checkUrl(i, apiKey, retries);
+        const p = queuePos++;
+        if (p >= indices.length) return;
+        await checkUrl(indices[p], apiKey, retries);
         completed++;
-        setProgress(completed, results.length);
+        setProgress(completed, indices.length);
       }
     }
 
@@ -426,15 +442,54 @@
     running = false;
     startBtn.disabled = false;
     stopBtn.disabled = true;
+    const anyErrors = results.some(r => r.error);
+    retryBtn.disabled = !anyErrors;
     downloadBtn.disabled = !results.some(r => !r.error);
 
     if (quotaHit) {
       showQuotaBanner(apiKey, quotaAnonymous);
     } else {
       statusEl.textContent = stopRequested
-        ? `Остановлено. Обработано ${completed} из ${results.length}.`
-        : `Готово. Обработано ${completed} из ${results.length}.`;
+        ? `Остановлено. Обработано ${completed} из ${indices.length}.`
+        : `Готово. Обработано ${completed} из ${indices.length}.${anyErrors ? " Есть ошибки — можно нажать «Повторить ошибки»." : ""}`;
     }
+  }
+
+  async function runScan() {
+    const urls = parseUrls(urlsEl.value);
+    if (!urls.length) {
+      alert("Добавьте хотя бы одну ссылку.");
+      return;
+    }
+    const apiKey = requireApiKey();
+    if (!apiKey) return;
+
+    results = urls.map(url => ({ url, desktop: null, mobile: null, status: "ожидание", error: null }));
+    tbody.innerHTML = "";
+    results.forEach((_, i) => updateRow(i));
+    resultsCard.style.display = "";
+    updateSummary();
+
+    await runIndices(results.map((_, i) => i), apiKey, "Сканирование");
+  }
+
+  async function retryErrors() {
+    const apiKey = requireApiKey();
+    if (!apiKey) return;
+    const indices = results
+      .map((r, i) => (r.error ? i : -1))
+      .filter(i => i !== -1);
+    if (!indices.length) return;
+    // Reset errored rows
+    for (const i of indices) {
+      results[i].error = null;
+      results[i].status = "ожидание";
+      results[i].desktop = null;
+      results[i].mobile = null;
+      updateRow(i);
+    }
+    updateSummary();
+    await runIndices(indices, apiKey, "Повтор ошибок");
   }
 
   async function testApiKey() {
@@ -505,6 +560,7 @@
 
   startBtn.addEventListener("click", runScan);
   stopBtn.addEventListener("click", () => { stopRequested = true; statusEl.textContent = "Останавливаем после завершения текущих запросов…"; });
+  retryBtn.addEventListener("click", retryErrors);
   downloadBtn.addEventListener("click", downloadCSV);
   testKeyBtn.addEventListener("click", testApiKey);
   clearBtn.addEventListener("click", () => {
@@ -516,6 +572,7 @@
     progressBar.style.width = "0";
     statusEl.textContent = "Готово.";
     downloadBtn.disabled = true;
+    retryBtn.disabled = true;
   });
 })();
 </script>
