@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PageSpeed Bulk Checker</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    margin: 0;
+    padding: 24px;
+    background: #f6f7f9;
+    color: #1f2328;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h1 { margin: 0 0 4px; font-size: 24px; }
+  .subtitle { color: #656d76; margin-bottom: 20px; font-size: 14px; }
+  .card {
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+  .hint { font-size: 12px; color: #656d76; margin-top: 4px; margin-bottom: 8px; }
+  textarea, input[type=text], input[type=number] {
+    width: 100%;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+  textarea { min-height: 200px; resize: vertical; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 200px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button {
+    background: #1f883d;
+    color: #fff;
+    border: 1px solid rgba(31,35,40,0.15);
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #1a7f37; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: #f6f8fa; color: #1f2328; border-color: #d0d7de; }
+  button.secondary:hover:not(:disabled) { background: #f3f4f6; }
+  button.danger { background: #cf222e; }
+  button.danger:hover:not(:disabled) { background: #a40e26; }
+  .progress-wrap {
+    background: #eaeef2;
+    border-radius: 6px;
+    height: 10px;
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .progress-bar {
+    background: #1f883d;
+    height: 100%;
+    width: 0;
+    transition: width 0.2s ease;
+  }
+  .status { margin-top: 8px; font-size: 13px; color: #656d76; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid #eaeef2;
+    vertical-align: top;
+  }
+  th { background: #f6f8fa; font-weight: 600; position: sticky; top: 0; }
+  td.url { word-break: break-all; max-width: 500px; }
+  .score { display: inline-block; min-width: 42px; text-align: center; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+  .score.good { background: #dafbe1; color: #1a7f37; }
+  .score.avg  { background: #fff4d6; color: #9a6700; }
+  .score.bad  { background: #ffebe9; color: #cf222e; }
+  .score.err  { background: #eaeef2; color: #656d76; }
+  .table-wrap { max-height: 500px; overflow: auto; border: 1px solid #eaeef2; border-radius: 6px; }
+  .summary {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+    font-size: 13px;
+  }
+  .summary span strong { color: #1f2328; font-size: 16px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>PageSpeed Bulk Checker</h1>
+  <div class="subtitle">Массовая проверка производительности страниц через Google PageSpeed Insights API.</div>
+
+  <div class="card">
+    <label for="urls">Список URL (по одному в строке)</label>
+    <div class="hint">Пустые строки игнорируются. Поддерживаются сотни ссылок — они будут обработаны последовательно с учётом выбранного числа потоков.</div>
+    <textarea id="urls" placeholder="https://example.com&#10;https://example.com/page-1&#10;https://example.com/page-2"></textarea>
+
+    <div class="row" style="margin-top:16px;">
+      <div>
+        <label for="apiKey">Google API Key (опционально)</label>
+        <div class="hint">Без ключа ~1 запрос/сек. С ключом — до 400 QPM, 25000/день. <a href="https://developers.google.com/speed/docs/insights/v5/get-started#APIKey" target="_blank">Получить ключ</a></div>
+        <input type="text" id="apiKey" placeholder="AIza..." />
+      </div>
+      <div>
+        <label for="concurrency">Параллельных запросов</label>
+        <div class="hint">1–5. Больше = быстрее, но выше риск лимитов.</div>
+        <input type="number" id="concurrency" min="1" max="5" value="2" />
+      </div>
+      <div>
+        <label for="retries">Повторов при ошибке</label>
+        <div class="hint">При таймауте/ошибке API запрос повторится указанное число раз.</div>
+        <input type="number" id="retries" min="0" max="5" value="2" />
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="startBtn">Начать сканирование</button>
+      <button id="stopBtn" class="danger" disabled>Остановить</button>
+      <button id="downloadBtn" class="secondary" disabled>Скачать CSV</button>
+      <button id="clearBtn" class="secondary">Очистить результаты</button>
+    </div>
+
+    <div class="progress-wrap"><div id="progressBar" class="progress-bar"></div></div>
+    <div id="status" class="status">Готово.</div>
+  </div>
+
+  <div class="card" id="resultsCard" style="display:none;">
+    <div class="summary" id="summary"></div>
+    <div class="table-wrap">
+      <table id="resultsTable">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>URL</th>
+            <th>Desktop</th>
+            <th>Mobile</th>
+            <th>Статус</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const PSI_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed";
+
+  const $ = (id) => document.getElementById(id);
+  const urlsEl = $("urls");
+  const apiKeyEl = $("apiKey");
+  const concurrencyEl = $("concurrency");
+  const retriesEl = $("retries");
+  const startBtn = $("startBtn");
+  const stopBtn = $("stopBtn");
+  const downloadBtn = $("downloadBtn");
+  const clearBtn = $("clearBtn");
+  const progressBar = $("progressBar");
+  const statusEl = $("status");
+  const resultsCard = $("resultsCard");
+  const summaryEl = $("summary");
+  const tbody = document.querySelector("#resultsTable tbody");
+
+  let results = [];
+  let running = false;
+  let stopRequested = false;
+
+  // Persist API key between sessions
+  const savedKey = localStorage.getItem("psi_api_key");
+  if (savedKey) apiKeyEl.value = savedKey;
+  apiKeyEl.addEventListener("change", () => localStorage.setItem("psi_api_key", apiKeyEl.value.trim()));
+
+  function parseUrls(raw) {
+    return raw
+      .split(/\r?\n/)
+      .map(s => s.trim())
+      .filter(Boolean)
+      .filter((url, i, arr) => arr.indexOf(url) === i); // dedupe
+  }
+
+  function scoreClass(score) {
+    if (score === null || score === undefined) return "err";
+    if (score >= 90) return "good";
+    if (score >= 50) return "avg";
+    return "bad";
+  }
+
+  function renderScore(score) {
+    if (score === null || score === undefined) {
+      return `<span class="score err">—</span>`;
+    }
+    return `<span class="score ${scoreClass(score)}">${score}</span>`;
+  }
+
+  function renderRow(idx, row) {
+    const tr = document.createElement("tr");
+    tr.dataset.idx = idx;
+    tr.innerHTML = `
+      <td>${idx + 1}</td>
+      <td class="url"><a href="${row.url}" target="_blank" rel="noopener">${row.url}</a></td>
+      <td>${renderScore(row.desktop)}</td>
+      <td>${renderScore(row.mobile)}</td>
+      <td>${row.error ? `<span style="color:#cf222e;">${row.error}</span>` : (row.status || "ожидание")}</td>
+    `;
+    return tr;
+  }
+
+  function updateRow(idx) {
+    const row = results[idx];
+    const existing = tbody.querySelector(`tr[data-idx="${idx}"]`);
+    const fresh = renderRow(idx, row);
+    if (existing) existing.replaceWith(fresh);
+    else tbody.appendChild(fresh);
+  }
+
+  function updateSummary() {
+    const total = results.length;
+    const done = results.filter(r => r.status === "готово" || r.error).length;
+    const errors = results.filter(r => r.error).length;
+    const completedScores = results.filter(r => r.desktop !== null && r.mobile !== null && !r.error);
+    const avgD = completedScores.length ? Math.round(completedScores.reduce((a, r) => a + r.desktop, 0) / completedScores.length) : null;
+    const avgM = completedScores.length ? Math.round(completedScores.reduce((a, r) => a + r.mobile, 0) / completedScores.length) : null;
+    summaryEl.innerHTML = `
+      <span>Всего: <strong>${total}</strong></span>
+      <span>Готово: <strong>${done}</strong></span>
+      <span>Ошибки: <strong>${errors}</strong></span>
+      <span>Средний Desktop: <strong>${avgD ?? "—"}</strong></span>
+      <span>Средний Mobile: <strong>${avgM ?? "—"}</strong></span>
+    `;
+  }
+
+  function setProgress(done, total) {
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    progressBar.style.width = pct + "%";
+    statusEl.textContent = `Обработано ${done} из ${total} (${pct}%)`;
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function fetchScore(url, strategy, apiKey, retries) {
+    const params = new URLSearchParams({ url, strategy, category: "performance" });
+    if (apiKey) params.set("key", apiKey);
+    const endpoint = `${PSI_ENDPOINT}?${params.toString()}`;
+
+    let lastErr = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch(endpoint);
+        if (!res.ok) {
+          const body = await res.text();
+          let msg = `HTTP ${res.status}`;
+          try {
+            const j = JSON.parse(body);
+            if (j.error && j.error.message) msg = j.error.message;
+          } catch {}
+          // Retry on 429 / 5xx
+          if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+            await sleep(2000 * (attempt + 1));
+            lastErr = new Error(msg);
+            continue;
+          }
+          throw new Error(msg);
+        }
+        const data = await res.json();
+        const score = data?.lighthouseResult?.categories?.performance?.score;
+        if (typeof score !== "number") throw new Error("нет оценки performance");
+        return Math.round(score * 100);
+      } catch (err) {
+        lastErr = err;
+        if (attempt < retries) {
+          await sleep(1500 * (attempt + 1));
+          continue;
+        }
+      }
+    }
+    throw lastErr || new Error("неизвестная ошибка");
+  }
+
+  async function checkUrl(idx, apiKey, retries) {
+    const row = results[idx];
+    row.status = "проверка…";
+    updateRow(idx);
+
+    try {
+      // Run desktop and mobile in parallel per URL (2 requests)
+      const [desktop, mobile] = await Promise.all([
+        fetchScore(row.url, "desktop", apiKey, retries),
+        fetchScore(row.url, "mobile", apiKey, retries),
+      ]);
+      row.desktop = desktop;
+      row.mobile = mobile;
+      row.status = "готово";
+      row.error = null;
+    } catch (err) {
+      row.error = err.message || String(err);
+      row.status = "ошибка";
+    }
+    updateRow(idx);
+    updateSummary();
+  }
+
+  async function runScan() {
+    const urls = parseUrls(urlsEl.value);
+    if (!urls.length) {
+      alert("Добавьте хотя бы одну ссылку.");
+      return;
+    }
+    const apiKey = apiKeyEl.value.trim();
+    const concurrency = Math.max(1, Math.min(5, parseInt(concurrencyEl.value, 10) || 1));
+    const retries = Math.max(0, Math.min(5, parseInt(retriesEl.value, 10) || 0));
+
+    results = urls.map(url => ({ url, desktop: null, mobile: null, status: "ожидание", error: null }));
+    tbody.innerHTML = "";
+    results.forEach((_, i) => updateRow(i));
+    resultsCard.style.display = "";
+    updateSummary();
+    setProgress(0, urls.length);
+
+    running = true;
+    stopRequested = false;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    downloadBtn.disabled = true;
+
+    let nextIndex = 0;
+    let completed = 0;
+
+    async function worker() {
+      while (!stopRequested) {
+        const i = nextIndex++;
+        if (i >= results.length) return;
+        await checkUrl(i, apiKey, retries);
+        completed++;
+        setProgress(completed, results.length);
+      }
+    }
+
+    const workers = Array.from({ length: concurrency }, () => worker());
+    await Promise.all(workers);
+
+    running = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    downloadBtn.disabled = !results.some(r => !r.error);
+    statusEl.textContent = stopRequested
+      ? `Остановлено. Обработано ${completed} из ${results.length}.`
+      : `Готово. Обработано ${completed} из ${results.length}.`;
+  }
+
+  function toCSV() {
+    const header = ["URL", "Desktop Performance", "Mobile Performance", "Error"];
+    const lines = [header.join(",")];
+    for (const r of results) {
+      const cells = [
+        r.url,
+        r.desktop ?? "",
+        r.mobile ?? "",
+        r.error ?? "",
+      ].map(v => {
+        const s = String(v);
+        if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      });
+      lines.push(cells.join(","));
+    }
+    return lines.join("\n");
+  }
+
+  function downloadCSV() {
+    const csv = toCSV();
+    // BOM for Excel / Google Sheets UTF-8 compat
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    a.href = url;
+    a.download = `pagespeed-${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  startBtn.addEventListener("click", runScan);
+  stopBtn.addEventListener("click", () => { stopRequested = true; statusEl.textContent = "Останавливаем после завершения текущих запросов…"; });
+  downloadBtn.addEventListener("click", downloadCSV);
+  clearBtn.addEventListener("click", () => {
+    if (running) return;
+    results = [];
+    tbody.innerHTML = "";
+    summaryEl.innerHTML = "";
+    resultsCard.style.display = "none";
+    progressBar.style.width = "0";
+    statusEl.textContent = "Готово.";
+    downloadBtn.disabled = true;
+  });
+})();
+</script>
+</body>
+</html>
