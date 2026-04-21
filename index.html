@@ -53,6 +53,7 @@
   button.secondary:hover:not(:disabled) { background: #f3f4f6; }
   button.danger { background: #cf222e; }
   button.danger:hover:not(:disabled) { background: #a40e26; }
+  button.row-retry { padding: 4px 10px; font-size: 12px; }
   .progress-wrap {
     background: #eaeef2;
     border-radius: 6px;
@@ -76,11 +77,21 @@
   }
   th { background: #f6f8fa; font-weight: 600; position: sticky; top: 0; }
   td.url { word-break: break-all; max-width: 500px; }
-  .score { display: inline-block; min-width: 42px; text-align: center; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
-  .score.good { background: #dafbe1; color: #1a7f37; }
-  .score.avg  { background: #fff4d6; color: #9a6700; }
-  .score.bad  { background: #ffebe9; color: #cf222e; }
-  .score.err  { background: #eaeef2; color: #656d76; }
+  .score {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 14px;
+    border: 2px solid transparent;
+  }
+  .score.good { background: #e6f4ea; color: #0cce6b; border-color: #0cce6b; }
+  .score.avg  { background: #fff4e5; color: #ffa400; border-color: #ffa400; }
+  .score.bad  { background: #fce8e6; color: #ff4e42; border-color: #ff4e42; }
+  .score.err  { background: #eaeef2; color: #656d76; border-color: #d0d7de; font-size: 18px; }
   .table-wrap { max-height: 500px; overflow: auto; border: 1px solid #eaeef2; border-radius: 6px; }
   .summary {
     display: flex;
@@ -95,7 +106,6 @@
 <body>
 <div class="container">
   <h1>PageSpeed Bulk Checker</h1>
-  <div class="subtitle">Массовая проверка производительности страниц через Google PageSpeed Insights API.</div>
 
   <div class="card">
     <label for="urls">Список URL (по одному в строке)</label>
@@ -103,15 +113,6 @@
     <textarea id="urls" placeholder="https://example.com&#10;https://example.com/page-1&#10;https://example.com/page-2"></textarea>
 
     <div class="row" style="margin-top:16px;">
-      <div>
-        <label for="apiKey">Google API Key <span style="color:#cf222e;">*</span></label>
-        <div class="hint">Обязательно. Без ключа Google использует общую анонимную квоту — она исчерпана почти всегда. <a href="https://developers.google.com/speed/docs/insights/v5/get-started#APIKey" target="_blank">Как получить ключ</a>. Важно: в Google Cloud Console нужно включить <b>PageSpeed Insights API</b> для проекта ключа.</div>
-        <div style="display:flex; gap:8px;">
-          <input type="text" id="apiKey" placeholder="AIza..." style="flex:1;" />
-          <button id="testKeyBtn" type="button" class="secondary">Проверить ключ</button>
-        </div>
-        <div id="keyStatus" class="hint" style="margin-top:4px;"></div>
-      </div>
       <div>
         <label for="concurrency">Параллельных запросов</label>
         <div class="hint">1–5. Больше = быстрее, но выше риск лимитов.</div>
@@ -127,7 +128,6 @@
     <div class="actions">
       <button id="startBtn">Начать сканирование</button>
       <button id="stopBtn" class="danger" disabled>Остановить</button>
-      <button id="retryBtn" class="secondary" disabled>Повторить ошибки</button>
       <button id="downloadBtn" class="secondary" disabled>Скачать CSV</button>
       <button id="clearBtn" class="secondary">Очистить результаты</button>
     </div>
@@ -147,6 +147,7 @@
             <th>Desktop</th>
             <th>Mobile</th>
             <th>Статус</th>
+            <th>Действие</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -158,21 +159,16 @@
 <script>
 (() => {
   const PSI_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed";
-
-  const ANON_PROJECT_NUMBER = "583797351490";
+  const API_KEY = "AIzaSyAJDtUhVdpqQccbMcFyh9GNIqWsJtqlqfE";
 
   const $ = (id) => document.getElementById(id);
   const urlsEl = $("urls");
-  const apiKeyEl = $("apiKey");
   const concurrencyEl = $("concurrency");
   const retriesEl = $("retries");
   const startBtn = $("startBtn");
   const stopBtn = $("stopBtn");
   const downloadBtn = $("downloadBtn");
   const clearBtn = $("clearBtn");
-  const testKeyBtn = $("testKeyBtn");
-  const retryBtn = $("retryBtn");
-  const keyStatusEl = $("keyStatus");
   const progressBar = $("progressBar");
   const statusEl = $("status");
   const resultsCard = $("resultsCard");
@@ -182,17 +178,6 @@
   let results = [];
   let running = false;
   let stopRequested = false;
-
-  function maskKey(key) {
-    if (!key) return "—";
-    if (key.length <= 10) return key[0] + "…" + key.slice(-2);
-    return key.slice(0, 6) + "…" + key.slice(-4);
-  }
-
-  // Persist API key between sessions — save on every keystroke, not just blur
-  const savedKey = localStorage.getItem("psi_api_key");
-  if (savedKey) apiKeyEl.value = savedKey;
-  apiKeyEl.addEventListener("input", () => localStorage.setItem("psi_api_key", apiKeyEl.value.trim()));
 
   function parseUrls(raw) {
     return raw
@@ -219,12 +204,17 @@
   function renderRow(idx, row) {
     const tr = document.createElement("tr");
     tr.dataset.idx = idx;
+    const canRetry = !!row.error && !row.running;
+    const retryCell = canRetry
+      ? `<button class="row-retry secondary" data-retry="${idx}">Повторить</button>`
+      : row.running ? "проверка…" : "";
     tr.innerHTML = `
       <td>${idx + 1}</td>
       <td class="url"><a href="${row.url}" target="_blank" rel="noopener">${row.url}</a></td>
       <td>${renderScore(row.desktop)}</td>
       <td>${renderScore(row.mobile)}</td>
       <td>${row.error ? `<span style="color:#cf222e;">${row.error}</span>` : (row.status || "ожидание")}</td>
+      <td>${retryCell}</td>
     `;
     return tr;
   }
@@ -236,6 +226,35 @@
     if (existing) existing.replaceWith(fresh);
     else tbody.appendChild(fresh);
   }
+
+  async function retryRow(idx) {
+    const row = results[idx];
+    if (!row || row.running) return;
+    row.running = true;
+    row.error = null;
+    row.desktop = null;
+    row.mobile = null;
+    row.status = "проверка…";
+    updateRow(idx);
+    const retries = Math.max(0, Math.min(5, parseInt(retriesEl.value, 10) || 0));
+    await checkUrl(idx, API_KEY, retries);
+    row.running = false;
+    updateRow(idx);
+    updateSummary();
+    const anyErrors = results.some(r => r.error);
+    const anyScores = results.some(r => !r.error && (r.desktop !== null || r.mobile !== null));
+    downloadBtn.disabled = !anyScores;
+    statusEl.textContent = anyErrors
+      ? `Есть строки с ошибкой — можно повторить их по одной.`
+      : `Все строки проверены.`;
+  }
+
+  tbody.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-retry]");
+    if (!btn) return;
+    const idx = parseInt(btn.dataset.retry, 10);
+    if (!Number.isNaN(idx)) retryRow(idx);
+  });
 
   function updateSummary() {
     const total = results.length;
@@ -261,28 +280,6 @@
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  function isQuotaError(msg) {
-    if (!msg) return false;
-    const m = msg.toLowerCase();
-    return m.includes("quota exceeded")
-        || m.includes("queries per day")
-        || m.includes("dailylimitexceeded")
-        || m.includes("rate_limit_exceeded")
-        || m.includes("resource_exhausted");
-  }
-
-  function isAnonymousQuotaError(msg) {
-    return isQuotaError(msg) && msg.includes(ANON_PROJECT_NUMBER);
-  }
-
-  class QuotaError extends Error {
-    constructor(msg, anonymous) {
-      super(msg);
-      this.name = "QuotaError";
-      this.anonymous = !!anonymous;
-    }
-  }
-
   async function fetchScore(url, strategy, apiKey, retries) {
     const params = new URLSearchParams({ url, strategy, category: "performance" });
     if (apiKey) params.set("key", apiKey);
@@ -299,12 +296,7 @@
             const j = JSON.parse(body);
             if (j.error && j.error.message) msg = j.error.message;
           } catch {}
-
-          if (isQuotaError(msg)) {
-            // Daily quota — retry won't help, stop the whole scan
-            throw new QuotaError(msg, isAnonymousQuotaError(msg));
-          }
-          // Retry only on transient 5xx or non-quota 429 (per-minute throttle)
+          // Retry on 429 / 5xx
           if ((res.status === 429 || res.status >= 500) && attempt < retries) {
             await sleep(2000 * (attempt + 1));
             lastErr = new Error(msg);
@@ -313,31 +305,10 @@
           throw new Error(msg);
         }
         const data = await res.json();
-        const runtimeErr = data?.lighthouseResult?.runtimeError;
-        if (runtimeErr && runtimeErr.code && runtimeErr.code !== "NO_ERROR") {
-          const code = runtimeErr.code;
-          const detail = runtimeErr.message || "";
-          let hint = "";
-          switch (code) {
-            case "ERRORED_DOCUMENT_REQUEST":
-            case "FAILED_DOCUMENT_REQUEST":
-              hint = "страница не отдаёт HTML (ошибка сервера/блокировка бота)"; break;
-            case "DNS_FAILURE":
-              hint = "DNS не резолвится"; break;
-            case "NO_FCP":
-              hint = "страница не рендерится (нет First Contentful Paint)"; break;
-            case "PROTOCOL_TIMEOUT":
-              hint = "таймаут — страница слишком медленная"; break;
-            case "INSECURE_DOCUMENT_REQUEST":
-              hint = "HTTPS-ошибка сертификата"; break;
-          }
-          throw new Error(`Lighthouse: ${code}${hint ? ` (${hint})` : ""}${detail ? ` — ${detail}` : ""}`);
-        }
         const score = data?.lighthouseResult?.categories?.performance?.score;
         if (typeof score !== "number") throw new Error("нет оценки performance");
         return Math.round(score * 100);
       } catch (err) {
-        if (err instanceof QuotaError) throw err;
         lastErr = err;
         if (attempt < retries) {
           await sleep(1500 * (attempt + 1));
@@ -347,9 +318,6 @@
     }
     throw lastErr || new Error("неизвестная ошибка");
   }
-
-  let quotaHit = false;
-  let quotaAnonymous = false;
 
   async function checkUrl(idx, apiKey, retries) {
     const row = results[idx];
@@ -369,70 +337,43 @@
     } catch (err) {
       row.error = err.message || String(err);
       row.status = "ошибка";
-      if (err.name === "QuotaError") {
-        quotaHit = true;
-        if (err.anonymous) quotaAnonymous = true;
-        stopRequested = true;
-      }
     }
     updateRow(idx);
     updateSummary();
   }
 
-  function showQuotaBanner(apiKey, anonymous) {
-    let msg;
-    if (anonymous) {
-      msg = apiKey
-        ? `В ответе Google указан анонимный проект <code>${ANON_PROJECT_NUMBER}</code>, а не ваш — значит, ключ не применился. Проверьте: (1) ключ действительно вставлен в поле выше (сейчас: <b>${maskKey(apiKey)}</b>); (2) в Google Cloud Console в проекте ключа включён <b>PageSpeed Insights API</b> (APIs & Services → Library → PageSpeed Insights API → Enable); (3) у ключа нет ограничений по HTTP referrer/IP, блокирующих запросы из браузера (Credentials → ваш ключ → Application restrictions → None для теста).`
-        : `Вы запустили сканирование без API-ключа — используется общая анонимная квота Google, которая почти всегда исчерпана. Получите бесплатный ключ и вставьте его в поле «Google API Key».`;
-    } else {
-      msg = `Дневная квота вашего API-ключа исчерпана (по умолчанию 25 000 запросов/день на проект). Варианты: подождать сброса (полночь по Pacific Time ≈ 10:00–11:00 МСК), запросить повышение квоты в Google Cloud Console → APIs & Services → Quotas, или использовать ключ другого проекта.`;
+  async function runScan() {
+    const urls = parseUrls(urlsEl.value);
+    if (!urls.length) {
+      alert("Добавьте хотя бы одну ссылку.");
+      return;
     }
-    statusEl.innerHTML = `<span style="color:#cf222e; font-weight:600;">⚠ Квота исчерпана.</span> ${msg} Частичные результаты можно скачать кнопкой «Скачать CSV».`;
-  }
-
-  function requireApiKey() {
-    const apiKey = apiKeyEl.value.trim();
-    if (!apiKey) {
-      alert(
-        `Нужен Google API-ключ. Без него Google использует общую анонимную квоту, которая почти всегда исчерпана.\n\n` +
-        `Как получить (бесплатно):\n` +
-        `1. console.cloud.google.com — создайте проект\n` +
-        `2. APIs & Services → Library → PageSpeed Insights API → Enable\n` +
-        `3. APIs & Services → Credentials → Create credentials → API key\n` +
-        `4. Вставьте ключ (AIza…) в поле выше и нажмите «Проверить ключ».`
-      );
-      apiKeyEl.focus();
-      return null;
-    }
-    return apiKey;
-  }
-
-  async function runIndices(indices, apiKey, label) {
     const concurrency = Math.max(1, Math.min(5, parseInt(concurrencyEl.value, 10) || 1));
     const retries = Math.max(0, Math.min(5, parseInt(retriesEl.value, 10) || 0));
 
+    results = urls.map(url => ({ url, desktop: null, mobile: null, status: "ожидание", error: null }));
+    tbody.innerHTML = "";
+    results.forEach((_, i) => updateRow(i));
+    resultsCard.style.display = "";
+    updateSummary();
+    setProgress(0, urls.length);
+
     running = true;
     stopRequested = false;
-    quotaHit = false;
-    quotaAnonymous = false;
     startBtn.disabled = true;
-    retryBtn.disabled = true;
     stopBtn.disabled = false;
     downloadBtn.disabled = true;
-    statusEl.innerHTML = `${label}: ключ <b>${maskKey(apiKey)}</b>, параллельно: ${concurrency}, задач: ${indices.length}.`;
 
-    let queuePos = 0;
+    let nextIndex = 0;
     let completed = 0;
-    setProgress(0, indices.length);
 
     async function worker() {
       while (!stopRequested) {
-        const p = queuePos++;
-        if (p >= indices.length) return;
-        await checkUrl(indices[p], apiKey, retries);
+        const i = nextIndex++;
+        if (i >= results.length) return;
+        await checkUrl(i, API_KEY, retries);
         completed++;
-        setProgress(completed, indices.length);
+        setProgress(completed, results.length);
       }
     }
 
@@ -442,86 +383,10 @@
     running = false;
     startBtn.disabled = false;
     stopBtn.disabled = true;
-    const anyErrors = results.some(r => r.error);
-    retryBtn.disabled = !anyErrors;
     downloadBtn.disabled = !results.some(r => !r.error);
-
-    if (quotaHit) {
-      showQuotaBanner(apiKey, quotaAnonymous);
-    } else {
-      statusEl.textContent = stopRequested
-        ? `Остановлено. Обработано ${completed} из ${indices.length}.`
-        : `Готово. Обработано ${completed} из ${indices.length}.${anyErrors ? " Есть ошибки — можно нажать «Повторить ошибки»." : ""}`;
-    }
-  }
-
-  async function runScan() {
-    const urls = parseUrls(urlsEl.value);
-    if (!urls.length) {
-      alert("Добавьте хотя бы одну ссылку.");
-      return;
-    }
-    const apiKey = requireApiKey();
-    if (!apiKey) return;
-
-    results = urls.map(url => ({ url, desktop: null, mobile: null, status: "ожидание", error: null }));
-    tbody.innerHTML = "";
-    results.forEach((_, i) => updateRow(i));
-    resultsCard.style.display = "";
-    updateSummary();
-
-    await runIndices(results.map((_, i) => i), apiKey, "Сканирование");
-  }
-
-  async function retryErrors() {
-    const apiKey = requireApiKey();
-    if (!apiKey) return;
-    const indices = results
-      .map((r, i) => (r.error ? i : -1))
-      .filter(i => i !== -1);
-    if (!indices.length) return;
-    // Reset errored rows
-    for (const i of indices) {
-      results[i].error = null;
-      results[i].status = "ожидание";
-      results[i].desktop = null;
-      results[i].mobile = null;
-      updateRow(i);
-    }
-    updateSummary();
-    await runIndices(indices, apiKey, "Повтор ошибок");
-  }
-
-  async function testApiKey() {
-    const apiKey = apiKeyEl.value.trim();
-    if (!apiKey) {
-      keyStatusEl.innerHTML = `<span style="color:#cf222e;">Введите ключ перед проверкой.</span>`;
-      return;
-    }
-    testKeyBtn.disabled = true;
-    keyStatusEl.innerHTML = `Проверяем ключ <b>${maskKey(apiKey)}</b>…`;
-    try {
-      // Lightweight test: real PSI request against a tiny fast page
-      await fetchScore("https://example.com/", "desktop", apiKey, 0);
-      keyStatusEl.innerHTML = `<span style="color:#1a7f37;">✓ Ключ работает. PageSpeed Insights API доступен.</span>`;
-    } catch (err) {
-      const msg = err.message || String(err);
-      if (err.name === "QuotaError" && err.anonymous) {
-        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ Ключ не применяется — Google вернул анонимный проект <code>${ANON_PROJECT_NUMBER}</code>. Убедитесь, что ключ скопирован целиком и в его проекте включён PageSpeed Insights API.</span>`;
-      } else if (err.name === "QuotaError") {
-        keyStatusEl.innerHTML = `<span style="color:#9a6700;">⚠ Ключ принят, но его дневная квота исчерпана. Подождите сброса (полночь по Pacific Time) или используйте другой проект.</span>`;
-      } else if (/api key not valid|invalid_argument|bad request/i.test(msg)) {
-        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ Ключ недействителен: ${msg}</span>`;
-      } else if (/has not been used|disabled|SERVICE_DISABLED/i.test(msg)) {
-        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ В проекте ключа не включён PageSpeed Insights API. Включите его в Google Cloud Console → APIs & Services → Library.</span>`;
-      } else if (/referer|referrer|restricted|forbidden|403/i.test(msg)) {
-        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ У ключа ограничения (HTTP referrer/IP), блокирующие этот домен. Временно поставьте Application restrictions = None для теста.</span>`;
-      } else {
-        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ Ошибка: ${msg}</span>`;
-      }
-    } finally {
-      testKeyBtn.disabled = false;
-    }
+    statusEl.textContent = stopRequested
+      ? `Остановлено. Обработано ${completed} из ${results.length}.`
+      : `Готово. Обработано ${completed} из ${results.length}.`;
   }
 
   function toCSV() {
@@ -560,9 +425,7 @@
 
   startBtn.addEventListener("click", runScan);
   stopBtn.addEventListener("click", () => { stopRequested = true; statusEl.textContent = "Останавливаем после завершения текущих запросов…"; });
-  retryBtn.addEventListener("click", retryErrors);
   downloadBtn.addEventListener("click", downloadCSV);
-  testKeyBtn.addEventListener("click", testApiKey);
   clearBtn.addEventListener("click", () => {
     if (running) return;
     results = [];
@@ -572,7 +435,6 @@
     progressBar.style.width = "0";
     statusEl.textContent = "Готово.";
     downloadBtn.disabled = true;
-    retryBtn.disabled = true;
   });
 })();
 </script>
