@@ -104,9 +104,13 @@
 
     <div class="row" style="margin-top:16px;">
       <div>
-        <label for="apiKey">Google API Key (опционально)</label>
-        <div class="hint">Без ключа ~1 запрос/сек. С ключом — до 400 QPM, 25000/день. <a href="https://developers.google.com/speed/docs/insights/v5/get-started#APIKey" target="_blank">Получить ключ</a></div>
-        <input type="text" id="apiKey" placeholder="AIza..." />
+        <label for="apiKey">Google API Key <span style="color:#cf222e;">*</span></label>
+        <div class="hint">Обязательно. Без ключа Google использует общую анонимную квоту — она исчерпана почти всегда. <a href="https://developers.google.com/speed/docs/insights/v5/get-started#APIKey" target="_blank">Как получить ключ</a>. Важно: в Google Cloud Console нужно включить <b>PageSpeed Insights API</b> для проекта ключа.</div>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="apiKey" placeholder="AIza..." style="flex:1;" />
+          <button id="testKeyBtn" type="button" class="secondary">Проверить ключ</button>
+        </div>
+        <div id="keyStatus" class="hint" style="margin-top:4px;"></div>
       </div>
       <div>
         <label for="concurrency">Параллельных запросов</label>
@@ -154,6 +158,8 @@
 (() => {
   const PSI_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed";
 
+  const ANON_PROJECT_NUMBER = "583797351490";
+
   const $ = (id) => document.getElementById(id);
   const urlsEl = $("urls");
   const apiKeyEl = $("apiKey");
@@ -163,6 +169,8 @@
   const stopBtn = $("stopBtn");
   const downloadBtn = $("downloadBtn");
   const clearBtn = $("clearBtn");
+  const testKeyBtn = $("testKeyBtn");
+  const keyStatusEl = $("keyStatus");
   const progressBar = $("progressBar");
   const statusEl = $("status");
   const resultsCard = $("resultsCard");
@@ -173,10 +181,16 @@
   let running = false;
   let stopRequested = false;
 
-  // Persist API key between sessions
+  function maskKey(key) {
+    if (!key) return "—";
+    if (key.length <= 10) return key[0] + "…" + key.slice(-2);
+    return key.slice(0, 6) + "…" + key.slice(-4);
+  }
+
+  // Persist API key between sessions — save on every keystroke, not just blur
   const savedKey = localStorage.getItem("psi_api_key");
   if (savedKey) apiKeyEl.value = savedKey;
-  apiKeyEl.addEventListener("change", () => localStorage.setItem("psi_api_key", apiKeyEl.value.trim()));
+  apiKeyEl.addEventListener("input", () => localStorage.setItem("psi_api_key", apiKeyEl.value.trim()));
 
   function parseUrls(raw) {
     return raw
@@ -255,8 +269,16 @@
         || m.includes("resource_exhausted");
   }
 
+  function isAnonymousQuotaError(msg) {
+    return isQuotaError(msg) && msg.includes(ANON_PROJECT_NUMBER);
+  }
+
   class QuotaError extends Error {
-    constructor(msg) { super(msg); this.name = "QuotaError"; }
+    constructor(msg, anonymous) {
+      super(msg);
+      this.name = "QuotaError";
+      this.anonymous = !!anonymous;
+    }
   }
 
   async function fetchScore(url, strategy, apiKey, retries) {
@@ -278,7 +300,7 @@
 
           if (isQuotaError(msg)) {
             // Daily quota — retry won't help, stop the whole scan
-            throw new QuotaError(msg);
+            throw new QuotaError(msg, isAnonymousQuotaError(msg));
           }
           // Retry only on transient 5xx or non-quota 429 (per-minute throttle)
           if ((res.status === 429 || res.status >= 500) && attempt < retries) {
@@ -305,6 +327,7 @@
   }
 
   let quotaHit = false;
+  let quotaAnonymous = false;
 
   async function checkUrl(idx, apiKey, retries) {
     const row = results[idx];
@@ -326,6 +349,7 @@
       row.status = "ошибка";
       if (err.name === "QuotaError") {
         quotaHit = true;
+        if (err.anonymous) quotaAnonymous = true;
         stopRequested = true;
       }
     }
@@ -333,11 +357,16 @@
     updateSummary();
   }
 
-  function showQuotaBanner(apiKey) {
-    const msg = apiKey
-      ? `Дневная квота API-ключа исчерпана (по умолчанию 25 000 запросов/день на проект). Варианты: подождать сброса (полночь по Pacific Time ≈ 10:00–11:00 по Москве), запросить увеличение квоты в Google Cloud Console → APIs & Services → Quotas, или использовать ключ другого проекта. Частичные результаты можно скачать кнопкой «Скачать CSV».`
-      : `Исчерпана анонимная квота Google PageSpeed API (без ключа она очень низкая, общая на всех пользователей без ключа). Получите свой API-ключ — это бесплатно и даёт 25 000 запросов/день: https://developers.google.com/speed/docs/insights/v5/get-started#APIKey — затем вставьте его в поле «Google API Key» и повторите.`;
-    statusEl.innerHTML = `<span style="color:#cf222e; font-weight:600;">⚠ Квота исчерпана.</span> ${msg}`;
+  function showQuotaBanner(apiKey, anonymous) {
+    let msg;
+    if (anonymous) {
+      msg = apiKey
+        ? `В ответе Google указан анонимный проект <code>${ANON_PROJECT_NUMBER}</code>, а не ваш — значит, ключ не применился. Проверьте: (1) ключ действительно вставлен в поле выше (сейчас: <b>${maskKey(apiKey)}</b>); (2) в Google Cloud Console в проекте ключа включён <b>PageSpeed Insights API</b> (APIs & Services → Library → PageSpeed Insights API → Enable); (3) у ключа нет ограничений по HTTP referrer/IP, блокирующих запросы из браузера (Credentials → ваш ключ → Application restrictions → None для теста).`
+        : `Вы запустили сканирование без API-ключа — используется общая анонимная квота Google, которая почти всегда исчерпана. Получите бесплатный ключ и вставьте его в поле «Google API Key».`;
+    } else {
+      msg = `Дневная квота вашего API-ключа исчерпана (по умолчанию 25 000 запросов/день на проект). Варианты: подождать сброса (полночь по Pacific Time ≈ 10:00–11:00 МСК), запросить повышение квоты в Google Cloud Console → APIs & Services → Quotas, или использовать ключ другого проекта.`;
+    }
+    statusEl.innerHTML = `<span style="color:#cf222e; font-weight:600;">⚠ Квота исчерпана.</span> ${msg} Частичные результаты можно скачать кнопкой «Скачать CSV».`;
   }
 
   async function runScan() {
@@ -347,13 +376,17 @@
       return;
     }
     const apiKey = apiKeyEl.value.trim();
-    if (!apiKey && urls.length > 5) {
-      const ok = confirm(
-        `API-ключ не задан. Без ключа Google использует общую анонимную квоту с очень низким дневным лимитом — сотни URL почти наверняка не пройдут.\n\n` +
-        `Рекомендуется: получить бесплатный ключ на console.cloud.google.com (Enable API → PageSpeed Insights API → Create credentials → API key) и вставить его в поле.\n\n` +
-        `Продолжить без ключа?`
+    if (!apiKey) {
+      alert(
+        `Нужен Google API-ключ. Без него Google использует общую анонимную квоту, которая почти всегда исчерпана.\n\n` +
+        `Как получить (бесплатно):\n` +
+        `1. console.cloud.google.com — создайте проект\n` +
+        `2. APIs & Services → Library → PageSpeed Insights API → Enable\n` +
+        `3. APIs & Services → Credentials → Create credentials → API key\n` +
+        `4. Вставьте ключ (AIza…) в поле выше и нажмите «Проверить ключ».`
       );
-      if (!ok) return;
+      apiKeyEl.focus();
+      return;
     }
     const concurrency = Math.max(1, Math.min(5, parseInt(concurrencyEl.value, 10) || 1));
     const retries = Math.max(0, Math.min(5, parseInt(retriesEl.value, 10) || 0));
@@ -368,9 +401,11 @@
     running = true;
     stopRequested = false;
     quotaHit = false;
+    quotaAnonymous = false;
     startBtn.disabled = true;
     stopBtn.disabled = false;
     downloadBtn.disabled = true;
+    statusEl.innerHTML = `Запуск… используется ключ <b>${maskKey(apiKey)}</b>, параллельно: ${concurrency}.`;
 
     let nextIndex = 0;
     let completed = 0;
@@ -394,11 +429,43 @@
     downloadBtn.disabled = !results.some(r => !r.error);
 
     if (quotaHit) {
-      showQuotaBanner(apiKey);
+      showQuotaBanner(apiKey, quotaAnonymous);
     } else {
       statusEl.textContent = stopRequested
         ? `Остановлено. Обработано ${completed} из ${results.length}.`
         : `Готово. Обработано ${completed} из ${results.length}.`;
+    }
+  }
+
+  async function testApiKey() {
+    const apiKey = apiKeyEl.value.trim();
+    if (!apiKey) {
+      keyStatusEl.innerHTML = `<span style="color:#cf222e;">Введите ключ перед проверкой.</span>`;
+      return;
+    }
+    testKeyBtn.disabled = true;
+    keyStatusEl.innerHTML = `Проверяем ключ <b>${maskKey(apiKey)}</b>…`;
+    try {
+      // Lightweight test: real PSI request against a tiny fast page
+      await fetchScore("https://example.com/", "desktop", apiKey, 0);
+      keyStatusEl.innerHTML = `<span style="color:#1a7f37;">✓ Ключ работает. PageSpeed Insights API доступен.</span>`;
+    } catch (err) {
+      const msg = err.message || String(err);
+      if (err.name === "QuotaError" && err.anonymous) {
+        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ Ключ не применяется — Google вернул анонимный проект <code>${ANON_PROJECT_NUMBER}</code>. Убедитесь, что ключ скопирован целиком и в его проекте включён PageSpeed Insights API.</span>`;
+      } else if (err.name === "QuotaError") {
+        keyStatusEl.innerHTML = `<span style="color:#9a6700;">⚠ Ключ принят, но его дневная квота исчерпана. Подождите сброса (полночь по Pacific Time) или используйте другой проект.</span>`;
+      } else if (/api key not valid|invalid_argument|bad request/i.test(msg)) {
+        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ Ключ недействителен: ${msg}</span>`;
+      } else if (/has not been used|disabled|SERVICE_DISABLED/i.test(msg)) {
+        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ В проекте ключа не включён PageSpeed Insights API. Включите его в Google Cloud Console → APIs & Services → Library.</span>`;
+      } else if (/referer|referrer|restricted|forbidden|403/i.test(msg)) {
+        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ У ключа ограничения (HTTP referrer/IP), блокирующие этот домен. Временно поставьте Application restrictions = None для теста.</span>`;
+      } else {
+        keyStatusEl.innerHTML = `<span style="color:#cf222e;">✗ Ошибка: ${msg}</span>`;
+      }
+    } finally {
+      testKeyBtn.disabled = false;
     }
   }
 
@@ -439,6 +506,7 @@
   startBtn.addEventListener("click", runScan);
   stopBtn.addEventListener("click", () => { stopRequested = true; statusEl.textContent = "Останавливаем после завершения текущих запросов…"; });
   downloadBtn.addEventListener("click", downloadCSV);
+  testKeyBtn.addEventListener("click", testApiKey);
   clearBtn.addEventListener("click", () => {
     if (running) return;
     results = [];
