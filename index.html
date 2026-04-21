@@ -245,6 +245,20 @@
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  function isQuotaError(msg) {
+    if (!msg) return false;
+    const m = msg.toLowerCase();
+    return m.includes("quota exceeded")
+        || m.includes("queries per day")
+        || m.includes("dailylimitexceeded")
+        || m.includes("rate_limit_exceeded")
+        || m.includes("resource_exhausted");
+  }
+
+  class QuotaError extends Error {
+    constructor(msg) { super(msg); this.name = "QuotaError"; }
+  }
+
   async function fetchScore(url, strategy, apiKey, retries) {
     const params = new URLSearchParams({ url, strategy, category: "performance" });
     if (apiKey) params.set("key", apiKey);
@@ -261,7 +275,12 @@
             const j = JSON.parse(body);
             if (j.error && j.error.message) msg = j.error.message;
           } catch {}
-          // Retry on 429 / 5xx
+
+          if (isQuotaError(msg)) {
+            // Daily quota — retry won't help, stop the whole scan
+            throw new QuotaError(msg);
+          }
+          // Retry only on transient 5xx or non-quota 429 (per-minute throttle)
           if ((res.status === 429 || res.status >= 500) && attempt < retries) {
             await sleep(2000 * (attempt + 1));
             lastErr = new Error(msg);
@@ -274,6 +293,7 @@
         if (typeof score !== "number") throw new Error("нет оценки performance");
         return Math.round(score * 100);
       } catch (err) {
+        if (err instanceof QuotaError) throw err;
         lastErr = err;
         if (attempt < retries) {
           await sleep(1500 * (attempt + 1));
@@ -283,6 +303,8 @@
     }
     throw lastErr || new Error("неизвестная ошибка");
   }
+
+  let quotaHit = false;
 
   async function checkUrl(idx, apiKey, retries) {
     const row = results[idx];
@@ -302,9 +324,20 @@
     } catch (err) {
       row.error = err.message || String(err);
       row.status = "ошибка";
+      if (err.name === "QuotaError") {
+        quotaHit = true;
+        stopRequested = true;
+      }
     }
     updateRow(idx);
     updateSummary();
+  }
+
+  function showQuotaBanner(apiKey) {
+    const msg = apiKey
+      ? `Дневная квота API-ключа исчерпана (по умолчанию 25 000 запросов/день на проект). Варианты: подождать сброса (полночь по Pacific Time ≈ 10:00–11:00 по Москве), запросить увеличение квоты в Google Cloud Console → APIs & Services → Quotas, или использовать ключ другого проекта. Частичные результаты можно скачать кнопкой «Скачать CSV».`
+      : `Исчерпана анонимная квота Google PageSpeed API (без ключа она очень низкая, общая на всех пользователей без ключа). Получите свой API-ключ — это бесплатно и даёт 25 000 запросов/день: https://developers.google.com/speed/docs/insights/v5/get-started#APIKey — затем вставьте его в поле «Google API Key» и повторите.`;
+    statusEl.innerHTML = `<span style="color:#cf222e; font-weight:600;">⚠ Квота исчерпана.</span> ${msg}`;
   }
 
   async function runScan() {
@@ -314,6 +347,14 @@
       return;
     }
     const apiKey = apiKeyEl.value.trim();
+    if (!apiKey && urls.length > 5) {
+      const ok = confirm(
+        `API-ключ не задан. Без ключа Google использует общую анонимную квоту с очень низким дневным лимитом — сотни URL почти наверняка не пройдут.\n\n` +
+        `Рекомендуется: получить бесплатный ключ на console.cloud.google.com (Enable API → PageSpeed Insights API → Create credentials → API key) и вставить его в поле.\n\n` +
+        `Продолжить без ключа?`
+      );
+      if (!ok) return;
+    }
     const concurrency = Math.max(1, Math.min(5, parseInt(concurrencyEl.value, 10) || 1));
     const retries = Math.max(0, Math.min(5, parseInt(retriesEl.value, 10) || 0));
 
@@ -326,6 +367,7 @@
 
     running = true;
     stopRequested = false;
+    quotaHit = false;
     startBtn.disabled = true;
     stopBtn.disabled = false;
     downloadBtn.disabled = true;
@@ -350,9 +392,14 @@
     startBtn.disabled = false;
     stopBtn.disabled = true;
     downloadBtn.disabled = !results.some(r => !r.error);
-    statusEl.textContent = stopRequested
-      ? `Остановлено. Обработано ${completed} из ${results.length}.`
-      : `Готово. Обработано ${completed} из ${results.length}.`;
+
+    if (quotaHit) {
+      showQuotaBanner(apiKey);
+    } else {
+      statusEl.textContent = stopRequested
+        ? `Остановлено. Обработано ${completed} из ${results.length}.`
+        : `Готово. Обработано ${completed} из ${results.length}.`;
+    }
   }
 
   function toCSV() {
